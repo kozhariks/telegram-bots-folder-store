@@ -98,34 +98,26 @@ jobs:
           }
           EOF
 
-      # Upstream fake-codesigning profiles expired 2026-10-30; rules_apple aborts on
-      # ExpirationDate. Make.py only wires --disableProvisioningProfiles for generateProject,
-      # so patch build() to pass --//Telegram:disableProvisioningProfiles (sideload IPA is
-      # re-signed by the user anyway).
-      - name: Bypass expired fake provisioning profiles
+      # Device IPA needs provisioning_profile; disableProvisioningProfiles only works for
+      # simulator. Upstream fake profiles expired 2026-10-30 — same-length date patch in the
+      # embedded plist (rules_apple/plisttool reads ExpirationDate from the XML blob).
+      - name: Extend expired fake provisioning profiles
         run: |
           set -euo pipefail
           cd "$SOURCE_DIR"
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("build-system/Make/Make.py")
-          text = p.read_text()
-          old = (
-              "        if self.disable_provisioning_profiles:\n"
-              "            combined_arguments += ['--//Telegram:disableProvisioningProfiles']\n"
-          )
-          new = (
-              "        # CI: upstream fake profiles expired 2026-10-30; always skip for unsigned IPA\n"
-              "        if True or self.disable_provisioning_profiles:\n"
-              "            combined_arguments += ['--//Telegram:disableProvisioningProfiles']\n"
-          )
-          if "if True or self.disable_provisioning_profiles:" in text:
-              print("Already patched")
-          elif old not in text:
-              raise SystemExit("Make.py disable_provisioning_profiles anchor not found")
-          else:
-              p.write_text(text.replace(old, new, 1))
-              print("Patched Make.py invoke_build → always --//Telegram:disableProvisioningProfiles")
+          root = Path("build-system/fake-codesigning/profiles")
+          # Same length so CMS DER structure stays byte-aligned for lenient parsers.
+          old = b"2026-10-30T17:06:30Z"
+          new = b"2028-12-31T23:59:59Z"
+          assert len(old) == len(new)
+          for p in sorted(root.glob("*.mobileprovision")):
+              data = p.read_bytes()
+              if old not in data:
+                  raise SystemExit(f"expiration marker missing in {p.name}")
+              p.write_bytes(data.replace(old, new))
+              print(f"extended {p.name}")
           PY
 
       - name: Select Xcode
@@ -170,7 +162,7 @@ jobs:
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_telegram_bots"
           BUILD_NUMBER="${{ github.run_number }}"
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs || true
-          # Fake-codesigning material + patched disableProvisioningProfiles (expired profiles).
+          # Match upstream Telegram-iOS CI: fake-codesigning → unsigned IPA.
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             --overrideXcodeVersion \

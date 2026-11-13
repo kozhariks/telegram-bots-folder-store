@@ -98,27 +98,38 @@ jobs:
           }
           EOF
 
-      # Device IPA needs provisioning_profile; disableProvisioningProfiles only works for
-      # simulator. Upstream fake profiles expired 2026-10-30 — same-length date patch in the
-      # embedded plist (rules_apple/plisttool reads ExpirationDate from the XML blob).
-      - name: Extend expired fake provisioning profiles
+      # Device IPA needs provisioning_profile. Upstream fake profiles expired 2026-10-30;
+      # Make.py decodes them via `openssl smime -verify`, so we must re-CMS-sign after
+      # bumping ExpirationDate (in-place XML edits break the signature).
+      - name: Extend and re-sign fake provisioning profiles
         run: |
           set -euo pipefail
           cd "$SOURCE_DIR"
-          python3 - <<'PY'
-          from pathlib import Path
-          root = Path("build-system/fake-codesigning/profiles")
-          # Same length so CMS DER structure stays byte-aligned for lenient parsers.
-          old = b"2026-10-30T17:06:30Z"
-          new = b"2028-12-31T23:59:59Z"
-          assert len(old) == len(new)
-          for p in sorted(root.glob("*.mobileprovision")):
-              data = p.read_bytes()
-              if old not in data:
-                  raise SystemExit(f"expiration marker missing in {p.name}")
-              p.write_bytes(data.replace(old, new))
-              print(f"extended {p.name}")
-          PY
+          PROFILES_DIR="build-system/fake-codesigning/profiles"
+          P12="build-system/fake-codesigning/certs/SelfSigned.p12"
+          PEM="$RUNNER_TEMP/telegram-fake.pem"
+          NEW_EXPIRY="2028-12-31T23:59:59Z"
+          # Extract cert+key (OpenSSL 3 may need -legacy for older p12).
+          if ! openssl pkcs12 -in "$P12" -nodes -passin pass: -out "$PEM" 2>/dev/null; then
+            openssl pkcs12 -in "$P12" -nodes -passin pass: -legacy -out "$PEM"
+          fi
+          for profile in "$PROFILES_DIR"/*.mobileprovision; do
+            plist="$(mktemp)"
+            out="$(mktemp)"
+            openssl smime -inform der -verify -noverify -in "$profile" -out "$plist"
+            plutil -convert xml1 "$plist"
+            plutil -replace ExpirationDate -date "$NEW_EXPIRY" "$plist"
+            openssl smime -sign -signer "$PEM" -inkey "$PEM" -nodetach -outform der -in "$plist" -out "$out"
+            # Sanity: Make.py uses the same decode path
+            openssl smime -inform der -verify -noverify -in "$out" >/dev/null
+            mv "$out" "$profile"
+            rm -f "$plist"
+            echo "re-signed $(basename "$profile")"
+          done
+          rm -f "$PEM"
+          # Confirm decoded date
+          openssl smime -inform der -verify -noverify -in "$PROFILES_DIR/Intents.mobileprovision" \
+            | plutil -extract ExpirationDate raw -o - -
 
       - name: Select Xcode
         run: |

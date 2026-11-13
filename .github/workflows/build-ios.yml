@@ -106,11 +106,11 @@ jobs:
               "    }",
           )
           PY
-          if grep -n "reservedRegions" submodules/Display/Source/ReservedArea.swift submodules/Display/Source/WindowContent.swift; then
-            echo "reservedRegions still present" >&2
+          if grep -n "reservedRegions" submodules/Display/Source/ReservedArea.swift submodules/Display/Source/WindowContent.swift | grep -v "CI: Xcode"; then
+            echo "reservedRegions call sites still present" >&2
             exit 1
           fi
-          echo "no reservedRegions left in Display stubs"
+          echo "reservedRegions call sites stubbed"
           df -h /
 
       - name: Write build configuration

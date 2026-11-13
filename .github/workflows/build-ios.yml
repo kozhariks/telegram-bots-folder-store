@@ -218,6 +218,8 @@ jobs:
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs || true
           # Tip wants Xcode 27.1; macos-26 has 26.6 whose opt Swift crashes (ShareScreen /
           # RichTextEditor SIL). Build debug_arm64 IPA for sideload instead of release_arm64.
+          OUTPUT_PATH="$SOURCE_DIR/build/artifacts"
+          mkdir -p "$OUTPUT_PATH"
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             --overrideXcodeVersion \
@@ -227,26 +229,25 @@ jobs:
             --configuration=debug_arm64 \
             --buildNumber="$BUILD_NUMBER"
 
-          OUTPUT_PATH="$SOURCE_DIR/build/artifacts"
-          mkdir -p "$OUTPUT_PATH"
-          shopt -s nullglob
-          IPAS=(bazel-out/applebin_ios-ios_arm*-dbg-ST-*/bin/Telegram/Telegram.ipa)
-          if [[ ${#IPAS[@]} -eq 0 ]]; then
-            IPAS=(bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa)
+          # Bazel prints: Target //Telegram:Telegram up-to-date: bazel-bin/Telegram/Telegram.ipa
+          # (symlink into output_user_root). Workspace bazel-out globs miss dbg paths.
+          DEST="$OUTPUT_PATH/Telegram-bots-folder.ipa"
+          if [[ -e bazel-bin/Telegram/Telegram.ipa ]]; then
+            cp -L bazel-bin/Telegram/Telegram.ipa "$DEST"
+          else
+            echo "bazel-bin/Telegram/Telegram.ipa missing; searching..." >&2
+            ls -la bazel-bin/Telegram/ 2>/dev/null || true
+            FOUND="$(find -L . "$BAZEL_USER_ROOT" -name 'Telegram.ipa' 2>/dev/null | head -n 1 || true)"
+            if [[ -z "$FOUND" ]]; then
+              echo "No IPA produced" >&2
+              find -L . -name '*.ipa' 2>/dev/null | head || true
+              df -h /
+              exit 1
+            fi
+            cp -L "$FOUND" "$DEST"
           fi
-          if [[ ${#IPAS[@]} -eq 0 ]]; then
-            # Fallback: any Telegram.ipa under bazel-out
-            IPAS=( $(find bazel-out -name 'Telegram.ipa' 2>/dev/null | head -n 5) )
-          fi
-          if [[ ${#IPAS[@]} -eq 0 ]]; then
-            echo "No IPA produced" >&2
-            find bazel-out -name '*.ipa' 2>/dev/null | head || true
-            df -h /
-            exit 1
-          fi
-          cp "${IPAS[0]}" "$OUTPUT_PATH/Telegram-bots-folder.ipa"
-          ls -lh "$OUTPUT_PATH"
-          echo "IPA_PATH=$OUTPUT_PATH/Telegram-bots-folder.ipa" >> "$GITHUB_ENV"
+          ls -lh "$DEST"
+          echo "IPA_PATH=$DEST" >> "$GITHUB_ENV"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4

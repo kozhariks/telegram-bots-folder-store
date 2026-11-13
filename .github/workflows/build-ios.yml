@@ -98,45 +98,33 @@ jobs:
           }
           EOF
 
-      # Upstream fake-codesigning profiles expire 2026-10-30; rules_apple refuses them.
-      # Extend ExpirationDate and re-CMS-sign with SelfSigned.p12 (unsigned IPA for sideload).
-      - name: Refresh expired fake provisioning profiles
+      # Upstream fake-codesigning profiles expired 2026-10-30; rules_apple aborts on
+      # ExpirationDate. Make.py only wires --disableProvisioningProfiles for generateProject,
+      # so patch build() to pass --//Telegram:disableProvisioningProfiles (sideload IPA is
+      # re-signed by the user anyway).
+      - name: Bypass expired fake provisioning profiles
         run: |
           set -euo pipefail
           cd "$SOURCE_DIR"
-          PROFILES_DIR="build-system/fake-codesigning/profiles"
-          P12="build-system/fake-codesigning/certs/SelfSigned.p12"
-          NEW_EXPIRY="2028-12-31T23:59:59Z"
-          KEYCHAIN="$RUNNER_TEMP/telegram-fake-refresh.keychain-db"
-          KEYCHAIN_PW="temp123"
-          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
-          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
-          security set-keychain-settings "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
-          security import "$P12" -k "$KEYCHAIN" -P "" -A -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S "apple-tool:,apple:" -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
-          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | awk -F'"' '/"/ {print $2; exit}')
-          if [[ -z "$IDENTITY" ]]; then
-            echo "Could not resolve signing identity from SelfSigned.p12" >&2
-            security find-identity -v -p codesigning "$KEYCHAIN" || true
-            exit 1
-          fi
-          echo "Re-signing profiles as: $IDENTITY"
-          for profile in "$PROFILES_DIR"/*.mobileprovision; do
-            plist="$(mktemp)"
-            out="$(mktemp)"
-            security cms -D -i "$profile" > "$plist"
-            plutil -replace ExpirationDate -date "$NEW_EXPIRY" "$plist"
-            plutil -remove DER-Encoded-Profile "$plist" 2>/dev/null || true
-            security cms -S -N "$IDENTITY" -k "$KEYCHAIN" -i "$plist" -o "$out"
-            mv "$out" "$profile"
-            rm -f "$plist"
-            echo "re-signed $(basename "$profile")"
-          done
-          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
-          # Sanity: decoded ExpirationDate must be in the future
-          security cms -D -i "$PROFILES_DIR/Intents.mobileprovision" | plutil -extract ExpirationDate raw -o - -
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("build-system/Make/Make.py")
+          text = p.read_text()
+          needle = (
+              "    bazel_command_line.set_profile_swift(arguments.profileSwift)\n\n"
+              "    bazel_command_line.invoke_build()"
+          )
+          repl = (
+              "    bazel_command_line.set_profile_swift(arguments.profileSwift)\n"
+              "    # CI: fake profiles expired; unsigned IPA for sideload\n"
+              "    bazel_command_line.set_disable_provisioning_profiles()\n\n"
+              "    bazel_command_line.invoke_build()"
+          )
+          if needle not in text:
+              raise SystemExit("Make.py patch anchor not found")
+          p.write_text(text.replace(needle, repl, 1))
+          print("Patched Make.py build() → set_disable_provisioning_profiles()")
+          PY
 
       - name: Select Xcode
         run: |
@@ -180,8 +168,7 @@ jobs:
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_telegram_bots"
           BUILD_NUMBER="${{ github.run_number }}"
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs || true
-          # Match upstream Telegram-iOS CI: fake-codesigning → unsigned IPA.
-          # (--disableProvisioningProfiles is only for generateProject, not build)
+          # Fake-codesigning material + patched disableProvisioningProfiles (expired profiles).
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             --overrideXcodeVersion \

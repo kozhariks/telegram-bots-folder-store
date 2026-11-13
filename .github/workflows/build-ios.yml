@@ -68,6 +68,49 @@ jobs:
           else
             echo "Integration patch check failed (ok if Feature overlay already contains full files)."
           fi
+          # Tip uses UIView.reservedRegions (iOS 27.1 / Xcode 27). macos-26 runners ship
+          # Xcode 26.6 — stub those call sites; Duo table fallbacks still apply.
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          def stub(path: Path, name: str, replacement: str) -> None:
+              text = path.read_text()
+              if "CI: Xcode 26.6 SDK has no reservedRegions" in text:
+                  print(f"already stubbed in {path}")
+                  return
+              m = re.search(
+                  rf"(^[ \t]*(?:public |private |fileprivate )*(?:func|var) {re.escape(name)}\b[\s\S]*?reservedRegions[\s\S]*?^[ \t]*\}})",
+                  text,
+                  flags=re.M,
+              )
+              if not m:
+                  raise SystemExit(f"could not find {name}/reservedRegions in {path}")
+              path.write_text(text[: m.start()] + replacement + text[m.end() :])
+              print(f"stubbed {name} in {path}")
+
+          stub(
+              Path("submodules/Display/Source/ReservedArea.swift"),
+              "activeOcclusionFrames",
+              "func activeOcclusionFrames(in view: UIView) -> [CGRect] {\n"
+              "    // CI: Xcode 26.6 SDK has no reservedRegions (needs iOS 27.1).\n"
+              "    return []\n"
+              "}",
+          )
+          stub(
+              Path("submodules/Display/Source/WindowContent.swift"),
+              "activeDivision",
+              "    fileprivate var activeDivision: CGRect? {\n"
+              "        // CI: Xcode 26.6 SDK has no reservedRegions (needs iOS 27.1).\n"
+              "        return nil\n"
+              "    }",
+          )
+          PY
+          if grep -n "reservedRegions" submodules/Display/Source/ReservedArea.swift submodules/Display/Source/WindowContent.swift; then
+            echo "reservedRegions still present" >&2
+            exit 1
+          fi
+          echo "no reservedRegions left in Display stubs"
           df -h /
 
       - name: Write build configuration

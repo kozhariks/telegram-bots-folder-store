@@ -1,0 +1,10 @@
+.DS_Store
+*.apk
+*.ipa
+*.xcuserstate
+local.properties
+**/BuildVars.java
+**/tezam-configuration.json
+**/*secrets*
+Media/*.mov
+Media/*.raw

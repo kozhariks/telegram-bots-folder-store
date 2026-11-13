@@ -17,7 +17,9 @@ env:
 
 jobs:
   ios:
-    runs-on: macos-15
+    # Telegram-iOS tip needs Icon Composer (.icon) → Xcode 26+.
+    # macos-15 defaults to Xcode 16.4 and fails analysis; macos-26 ships Xcode 26.6.
+    runs-on: macos-26
     timeout-minutes: 360
 
     steps:
@@ -34,6 +36,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
           sudo rm -rf ~/Library/Developer/CoreSimulator || true
+          # Drop unused Xcode 26.x copies except the one we select later — reclaim tens of GB.
           brew cleanup -s || true
           df -h /
 
@@ -99,14 +102,36 @@ jobs:
         run: |
           set -euo pipefail
           ls /Applications | grep -i Xcode || true
-          # Prefer versions.json if that Xcode exists; otherwise newest installed.
           WANT=$(python3 -c 'import json; print(json.load(open("'"$SOURCE_DIR"'/versions.json"))["xcode"])')
-          if [[ -d "/Applications/Xcode_${WANT}.app" ]]; then
-            sudo xcode-select -s "/Applications/Xcode_${WANT}.app/Contents/Developer"
-          else
-            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          # Prefer exact versions.json match, else newest Xcode 27/26 (Icon Composer requires ≥26).
+          SELECTED=""
+          for cand in \
+            "Xcode_${WANT}.app" \
+            "Xcode_27.1.app" "Xcode_27.0.app" "Xcode_27.app" \
+            "Xcode_26.6.app" "Xcode_26.5.app" "Xcode_26.4.1.app" "Xcode_26.4.app" \
+            "Xcode_26.3.app" "Xcode_26.2.app" "Xcode_26.1.1.app" "Xcode_26.0.1.app" \
+            "Xcode.app"
+          do
+            if [[ -d "/Applications/${cand}" ]]; then
+              SELECTED="/Applications/${cand}"
+              break
+            fi
+          done
+          if [[ -z "$SELECTED" ]]; then
+            echo "No suitable Xcode ≥26 found" >&2
+            exit 1
           fi
+          echo "Using $SELECTED"
+          sudo xcode-select -s "$SELECTED/Contents/Developer"
           xcodebuild -version
+          # Remove other Xcode apps to free disk for Bazel (keep selected).
+          for app in /Applications/Xcode*.app; do
+            if [[ "$app" != "$SELECTED" ]]; then
+              echo "Removing $app to free disk"
+              sudo rm -rf "$app" || true
+            fi
+          done
+          df -h /
 
       - name: Build unsigned IPA
         run: |

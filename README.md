@@ -9,6 +9,13 @@ A bots-only chat folder can show a grid of Mini App icons instead of the classic
 
 Telegram concept for **iOS** (UIKit / AsyncDisplayKit) and **Android** (Java, Telegram-Android), built on top of the official sources — same packaging style as [Telegram Designers](https://t.me/designers) concept repos (feature files + integration patches).
 
+## Downloads
+
+| Platform | Build |
+|---|---|
+| **Android** | [tezam-bots-folder-android-afat-debug.apk](https://github.com/kozhariks/telegram-bots-folder-store/releases/download/v0.1.0-android/tezam-bots-folder-android-afat-debug.apk) — [Release page](https://github.com/kozhariks/telegram-bots-folder-store/releases/tag/v0.1.0-android) |
+| **iOS** | No IPA yet (needs Mac / TestFlight). Source + patch are below. |
+
 | Path | What |
 |---|---|
 | `ios/Feature/submodules/…` | New iOS files — copy over a Telegram-iOS checkout |

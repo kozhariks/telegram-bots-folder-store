@@ -21,6 +21,8 @@ jobs:
     # macos-15 defaults to Xcode 16.4 and fails analysis; macos-26 ships Xcode 26.6.
     runs-on: macos-26
     timeout-minutes: 360
+    permissions:
+      contents: write  # gh release create (default GITHUB_TOKEN is read-only otherwise)
 
     steps:
       - name: Checkout feature repo
@@ -263,11 +265,14 @@ jobs:
         run: |
           set -euo pipefail
           TAG="v0.1.0-ios-${{ github.run_number }}"
-          gh release create "$TAG" \
-            /Users/Shared/telegram-ios/build/artifacts/Telegram-bots-folder.ipa \
-            --repo "${{ github.repository }}" \
-            --title "v0.1.0 — iOS unsigned IPA (#${{ github.run_number }})" \
-            --notes "$(cat <<'EOF'
+          IPA="/Users/Shared/telegram-ios/build/artifacts/Telegram-bots-folder.ipa"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$IPA" --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$TAG" "$IPA" \
+              --repo "${{ github.repository }}" \
+              --title "v0.1.0 — iOS unsigned IPA (#${{ github.run_number }})" \
+              --notes "$(cat <<'EOF'
           ## iOS
           Unsigned **debug** IPA (fake-codesigning). Built with Xcode 26.6 /
           `debug_arm64` because tip release opts need Xcode 27.1.
@@ -278,3 +283,4 @@ jobs:
           See [v0.1.0-android](https://github.com/kozhariks/telegram-bots-folder-store/releases/tag/v0.1.0-android).
           EOF
           )"
+          fi

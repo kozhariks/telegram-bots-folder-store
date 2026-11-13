@@ -42,20 +42,30 @@ jobs:
           set -euo pipefail
           sudo mkdir -p /Users/Shared
           sudo chown -R "$(whoami)" /Users/Shared
-          git clone --filter=blob:none --no-checkout https://github.com/TelegramMessenger/Telegram-iOS.git "$SOURCE_DIR"
+          git init "$SOURCE_DIR"
           cd "$SOURCE_DIR"
-          git checkout "$TELEGRAM_IOS_REF"
+          git remote add origin https://github.com/TelegramMessenger/Telegram-iOS.git
+          git fetch --depth 1 origin "$TELEGRAM_IOS_REF"
+          git checkout FETCH_HEAD
           git submodule update --init --recursive --depth 1 --jobs 8
+          echo "Checked out $(git rev-parse HEAD)"
           df -h /
 
       - name: Apply bots-folder feature
         run: |
           set -euo pipefail
           cd "$SOURCE_DIR"
+          # Copy full Feature tree (new + modified files). More reliable than git apply on CI.
           cp -R "$GITHUB_WORKSPACE/feature/ios/Feature/submodules/." submodules/
-          git apply --whitespace=fix "$GITHUB_WORKSPACE/feature/ios/Integration/telegram-ios.patch"
-          echo "Patched tree ready."
-          git status -sb | head -n 40
+          echo "Feature files overlayed:"
+          find "$GITHUB_WORKSPACE/feature/ios/Feature" -type f | sed "s|$GITHUB_WORKSPACE/feature/ios/Feature/||"
+          # Optional: verify patch still applies cleanly for local docs
+          if git apply --check --whitespace=nowarn "$GITHUB_WORKSPACE/feature/ios/Integration/telegram-ios.patch"; then
+            echo "Integration patch checks clean against base (informational)."
+          else
+            echo "Integration patch check failed (ok if Feature overlay already contains full files)."
+          fi
+          df -h /
 
       - name: Write build configuration
         env:

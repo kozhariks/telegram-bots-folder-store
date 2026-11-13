@@ -1,1 +1,585 @@
-diff --git a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java index 0c5dc3f..c67b6d0 100644 --- a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java +++ b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java @@ -186,6 +186,8 @@ import org.telegram.ui.Components.BlurredRecyclerView;  import org.telegram.ui.Components.ColoredImageSpan;  import org.telegram.ui.Components.DialogsActivityStatusLayout;  import org.telegram.ui.Components.DialogsActivityTopBubblesFadeView; +import org.telegram.ui.Components.BotsFolderStoreView; +import org.telegram.ui.Components.BotsFolderViewHelper;  import org.telegram.ui.Components.DialogsActivityTopPanelLayout;  import org.telegram.ui.Components.FragmentFloatingButton;  import org.telegram.ui.Components.FragmentSearchField; @@ -361,6 +363,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.      public class ViewPage extends FrameLayout {          public int pageAdditionalOffset;          public DialogsRecyclerView listView; +        public BotsFolderStoreView botsStoreView;          public RecyclerListViewScroller scroller;          private LinearLayoutManager layoutManager;          private DialogsAdapter dialogsAdapter; @@ -957,6 +960,33 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                if (invalidateScrollY && (rightSlidingDialogContainer == null || !rightSlidingDialogContainer.hasFragment()) && progressToActionMode == 0) {                  invalidateScrollY = false; +                // Do not drive chrome scrollY from the Mini App grid during folder swipe — +                // align/reload would expand stories/search a bit on every page change. +                final boolean botsStoreDrivingScroll = viewPages[0] != null +                        && viewPages[0].botsStoreView != null +                        && viewPages[0].botsStoreView.getVisibility() == View.VISIBLE +                        && !tabsAnimationInProgress +                        && !startedTracking +                        && !maybeStartTracking; +                if (botsStoreDrivingScroll) { +                    Float visiblePartAfterScroll = viewPages[0].botsStoreView.computeVisiblePartAfterScroll(); +                    if (visiblePartAfterScroll != null) { +                        if (visiblePartAfterScroll >= 0) { +                            int maxScrollYOffset = getMaxScrollYOffset(); +                            float newTranslation = -visiblePartAfterScroll; +                            if (newTranslation < -maxScrollYOffset) { +                                newTranslation = -maxScrollYOffset; +                            } else if (newTranslation > 0) { +                                newTranslation = 0; +                            } +                            DialogsActivity.this.setScrollY(newTranslation); +                        } +                        // Do not setScrollY(0) on negative/unready readings — that expands search. +                    } +                } else if (viewPages[0] != null && viewPages[0].botsStoreView != null +                        && viewPages[0].botsStoreView.getVisibility() == View.VISIBLE) { +                    // Folder swipe in progress with store visible — leave scrollY alone. +                } else {                  int firstItemPosition = hasHiddenArchive() && viewPages[0].dialogsType == DIALOGS_TYPE_DEFAULT ? 1 : 0;                  DialogsRecyclerView recyclerView = viewPages[0].listView;                  if (fixScrollYAfterArchiveOpened) { @@ -1000,6 +1030,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                  } else {                      DialogsActivity.this.setScrollY(-getMaxScrollYOffset());                  } +                }              }              final int actionBarHeight = getActionBarFullHeight();              final int top; @@ -1490,33 +1521,30 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                              }                          }                          float dx; +                        final float page0TargetX; +                        final float page1TargetX;                          if (backAnimation) {                              dx = Math.abs(x); +                            page0TargetX = 0;                              if (animatingForward) { -                                tabsAnimation.playTogether( -                                        ObjectAnimator.ofFloat(viewPages[0], View.TRANSLATION_X, 0), -                                        ObjectAnimator.ofFloat(viewPages[1], View.TRANSLATION_X, viewPages[1].getMeasuredWidth()) -                                ); +                                page1TargetX = viewPages[1].getMeasuredWidth();                              } else { -                                tabsAnimation.playTogether( -                                        ObjectAnimator.ofFloat(viewPages[0], View.TRANSLATION_X, 0), -                                        ObjectAnimator.ofFloat(viewPages[1], View.TRANSLATION_X, -viewPages[1].getMeasuredWidth()) -                                ); +                                page1TargetX = -viewPages[1].getMeasuredWidth();                              }                          } else {                              dx = viewPages[0].getMeasuredWidth() - Math.abs(x);                              if (animatingForward) { -                                tabsAnimation.playTogether( -                                        ObjectAnimator.ofFloat(viewPages[0], View.TRANSLATION_X, -viewPages[0].getMeasuredWidth()), -                                        ObjectAnimator.ofFloat(viewPages[1], View.TRANSLATION_X, 0) -                                ); +                                page0TargetX = -viewPages[0].getMeasuredWidth(); +                                page1TargetX = 0;                              } else { -                                tabsAnimation.playTogether( -                                        ObjectAnimator.ofFloat(viewPages[0], View.TRANSLATION_X, viewPages[0].getMeasuredWidth()), -                                        ObjectAnimator.ofFloat(viewPages[1], View.TRANSLATION_X, 0) -                                ); +                                page0TargetX = viewPages[0].getMeasuredWidth(); +                                page1TargetX = 0;                              }                          } +                        tabsAnimation.playTogether( +                                ObjectAnimator.ofFloat(viewPages[0], View.TRANSLATION_X, page0TargetX), +                                ObjectAnimator.ofFloat(viewPages[1], View.TRANSLATION_X, page1TargetX) +                        );                          tabsAnimation.setInterpolator(interpolator);                            int width = getMeasuredWidth(); @@ -1554,6 +1582,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                                  actionBar.setEnabled(true);                                  filterTabsView.setEnabled(true);                                  checkListLoad(viewPages[0]); +                                updateBotsFolderStoreMode();                              }                          });                          tabsAnimation.start(); @@ -2100,6 +2129,11 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                          getChildAt(i).requestLayout();                      }                  } +                // Keep Mini App grid padding identical whenever list padding changes +                // (stories collapse, birthday panel, filter tabs). +                if (parentPage.botsStoreView != null && parentPage.botsStoreView.getVisibility() == View.VISIBLE) { +                    syncBotsFolderStorePaddings(parentPage); +                }              }              ignoreLayout = false;   @@ -3318,6 +3352,8 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.              @Override              public void onSearchExpand() {                  searching = true; +                // Leave Mini App desktop immediately so icons never sit above search UI. +                updateBotsFolderStoreMode();                  if (switchItem != null) {                      switchItem.setVisibility(View.GONE);                  } @@ -3392,6 +3428,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                  updateFloatingButtonVisibility(true);                  checkUi_mainTabsVisible();                  blur3_InvalidateBlur(); +                updateBotsFolderStoreMode();              }                @Override @@ -3662,6 +3699,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                          checkListLoad(viewPages[0]);                          viewPages[0].dialogsAdapter.resume();                          viewPages[1].dialogsAdapter.pause(); +                        updateBotsFolderStoreMode();                      }                  }   @@ -4028,6 +4066,18 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                for (ViewPage viewPage : viewPages) {                  if (viewPage != null && viewPage.getVisibility() == View.VISIBLE && viewPage.getAlpha() > 0f) { +                    if (viewPage.botsStoreView != null && viewPage.botsStoreView.getVisibility() == View.VISIBLE +                            && viewPage.botsStoreView.getGridView() != null) { +                        Blur3Utils.captureRelativeParent( +                                viewPage.botsStoreView.getGridView(), +                                canvas, +                                position, +                                viewPage.botsStoreView.getGridView(), +                                contentView, +                                255 - searchViewAlpha +                        ); +                        continue; +                    }                      float rp = getRightSlidingProgress();                      if (viewPage.animationSupportListView != null && rp > 0) {                          if (!ViewPositionWatcher.computeCoordinatesInParent(viewPage.listView, contentView, tmpPoint)) { @@ -4365,6 +4415,9 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.              viewPage.listView.setLayoutManager(viewPage.layoutManager);              viewPage.listView.setVerticalScrollbarPosition(LocaleController.isRTL ? RecyclerListView.SCROLLBAR_POSITION_LEFT : RecyclerListView.SCROLLBAR_POSITION_RIGHT);              viewPage.addView(viewPage.listView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT)); +            if (initialDialogsType == DIALOGS_TYPE_DEFAULT && !onlySelect && folderId == 0 && communityId == 0) { +                attachBotsFolderStoreView(viewPage, context); +            }              viewPage.listView.setOnItemClickListener((view, position, x, y) -> {                  if (view instanceof GraySectionCell)                      return; @@ -4787,6 +4840,8 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.              topPanelLayout = new DialogsActivityTopPanelLayout(context);              topPanelLayout.setOnAnimatedHeightChangedListener(() -> {                  viewPages[0].listView.requestLayout(); +                // Birthday / hint panel height feeds list padding — keep Mini App grid in sync. +                AndroidUtilities.runOnUIThread(this::syncBotsFolderStorePaddings);                    TopicsFragment topicsFragment = null;                  if (rightSlidingDialogContainer != null && rightSlidingDialogContainer.getFragment() instanceof TopicsFragment) { @@ -5588,8 +5643,10 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.          };          updateFilterTabs(true, false);          rightSlidingDialogContainer.setOpenProgress(0f); +          contentView.addView(dialogStoriesCell, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, DialogStoriesCell.HEIGHT_IN_DP));          contentView.addView(rightSlidingDialogContainer, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT)); +        updateBotsFolderStoreMode();            dialogsActivityStatusLayout = new DialogsActivityStatusLayout(context);          // contentView.addView(dialogsActivityStatusLayout, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP)); @@ -6827,6 +6884,225 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.          viewPages[a].dialogsAdapter.setDialogsType(viewPages[a].dialogsType);          viewPages[a].layoutManager.scrollToPositionWithOffset(viewPages[a].dialogsType == DIALOGS_TYPE_DEFAULT && hasHiddenArchive() && viewPages[a].archivePullViewState == ARCHIVE_ITEM_STATE_HIDDEN ? 1 : 0, (int) scrollYOffset);          checkListLoad(viewPages[a]); +        // Desktop grid lives inside ViewPage — update only the page being configured. +        updateBotsFolderStoreModeForPage(viewPages[a], filter); +    } + +    private void attachBotsFolderStoreView(ViewPage page, Context context) { +        if (page == null || page.botsStoreView != null || context == null) { +            return; +        } +        page.botsStoreView = new BotsFolderStoreView(context, currentAccount, resourceProvider, new BotsFolderStoreView.Callback() { +            @Override +            public void onOpenBot(TLRPC.User bot) { +                getMessagesController().openApp(DialogsActivity.this, bot, null, 0, null); +            } + +            @Override +            public void onOpenBotChat(TLRPC.User bot) { +                if (bot == null) { +                    return; +                } +                Bundle args = new Bundle(); +                args.putLong("user_id", bot.id); +                presentFragment(new ChatActivity(args)); +            } +        }); +        page.botsStoreView.setOnScrollInvalidate(() -> { +            invalidateScrollY = true; +            if (fragmentView != null) { +                fragmentView.invalidate(); +            } +        }); +        page.botsStoreView.getGridView().addOnScrollListener(new RecyclerView.OnScrollListener() { +            private boolean wasManualScroll; +            private int prevPosition = -1; +            private int prevTop; +            private boolean scrollUpdated; + +            @Override +            public void onScrollStateChanged(RecyclerView recyclerView, int newState) { +                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) { +                    wasManualScroll = true; +                    scrollingManually = true; +                } else { +                    scrollingManually = false; +                } +                if (newState == RecyclerView.SCROLL_STATE_IDLE) { +                    wasManualScroll = false; +                } +            } + +            @Override +            public void onScrolled(RecyclerView recyclerView, int dx, int dy) { +                if (fragmentView instanceof ContentView) { +                    ((ContentView) fragmentView).updateBlurContent(); +                } +                blur3_InvalidateBlur(); +                invalidateScrollY = true; +                if (fragmentView != null) { +                    fragmentView.invalidate(); +                } +                if (!wasManualScroll || recyclerView.getChildCount() <= 0) { +                    return; +                } +                int firstVisiblePosition = -1; +                for (int i = 0; i < recyclerView.getChildCount(); i++) { +                    int position = recyclerView.getChildAdapterPosition(recyclerView.getChildAt(i)); +                    if (position >= 0 && (firstVisiblePosition == -1 || position < firstVisiblePosition)) { +                        firstVisiblePosition = position; +                    } +                } +                if (firstVisiblePosition == RecyclerView.NO_POSITION || firstVisiblePosition < 0) { +                    return; +                } +                RecyclerView.ViewHolder holder = recyclerView.findViewHolderForAdapterPosition(firstVisiblePosition); +                int firstViewTop = holder != null ? holder.itemView.getTop() : 0; +                boolean goingDown; +                boolean changed = true; +                if (prevPosition == firstVisiblePosition) { +                    goingDown = firstViewTop < prevTop; +                    changed = Math.abs(prevTop - firstViewTop) > 1; +                } else { +                    goingDown = firstVisiblePosition > prevPosition; +                } +                if (changed && scrollUpdated && (goingDown || scrollingManually)) { +                    hideFloatingButton(goingDown); +                } +                prevPosition = firstVisiblePosition; +                prevTop = firstViewTop; +                scrollUpdated = true; +            } +        }); +        page.botsStoreView.setVisibility(View.GONE); +        page.addView(page.botsStoreView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT)); +    } + +    private MessagesController.DialogFilter getCurrentFolderFilter() { +        return getFilterForPage(viewPages != null && viewPages.length > 0 ? viewPages[0] : null); +    } + +    private MessagesController.DialogFilter getFilterForPage(ViewPage page) { +        if (page == null) { +            return null; +        } +        final int dialogsType = page.dialogsType; +        if (dialogsType != 7 && dialogsType != 8) { +            return null; +        } +        return getMessagesController().selectedDialogFilter[dialogsType - 7]; +    } + +    private boolean shouldShowBotsFolderStore(MessagesController.DialogFilter filter) { +        return BotsFolderViewHelper.isBotsOnlyFilter(filter) +                && BotsFolderViewHelper.isStoreMode() +                && !searching +                && !searchIsShowed +                && actionBar != null +                && !actionBar.isActionModeShowed(); +    } + +    private void updateBotsFolderStoreMode() { +        if (viewPages == null) { +            return; +        } +        for (int i = 0; i < viewPages.length; i++) { +            if (viewPages[i] != null) { +                updateBotsFolderStoreModeForPage(viewPages[i], getFilterForPage(viewPages[i])); +            } +        } +    } + +    private void updateBotsFolderStoreMode(MessagesController.DialogFilter filter) { +        if (viewPages == null || viewPages.length == 0 || viewPages[0] == null) { +            return; +        } +        updateBotsFolderStoreModeForPage(viewPages[0], filter); +    } + +    private void updateBotsFolderStoreModeForPage(ViewPage page, MessagesController.DialogFilter filter) { +        if (page == null || page.botsStoreView == null || page.listView == null) { +            return; +        } +        final boolean showStore = shouldShowBotsFolderStore(filter); +        if (showStore) { +            final boolean becameVisible = page.botsStoreView.getVisibility() != View.VISIBLE; +            // Keep listView in hierarchy (INVISIBLE) so ViewPage swipe geometry stays stable, +            // but draw the desktop grid as the page content — sibling of listView, not overlay. +            page.listView.setVisibility(View.INVISIBLE); +            page.listView.setAlpha(0f); +            if (page.progressView != null) { +                page.progressView.setVisibility(View.GONE); +            } +            page.botsStoreView.setVisibility(View.VISIBLE); +            // Keep hidden list scrolled with chrome so leaving Apps does not expand search. +            if (page.layoutManager != null) { +                page.layoutManager.scrollToPositionWithOffset(0, (int) scrollYOffset); +            } +            if (becameVisible) { +                page.botsStoreView.onShown((int) scrollYOffset); +            } +            syncBotsFolderStorePaddings(page, true); +            if (becameVisible) { +                final ViewPage storePage = page; +                page.botsStoreView.post(() -> { +                    if (storePage.botsStoreView != null +                            && storePage.botsStoreView.getVisibility() == View.VISIBLE) { +                        syncBotsFolderStorePaddings(storePage, true); +                    } +                }); +            } +        } else { +            final boolean wasStore = page.botsStoreView.getVisibility() == View.VISIBLE; +            page.botsStoreView.setVisibility(View.GONE); +            page.listView.setVisibility(View.VISIBLE); +            page.listView.setAlpha(1f); +            if (wasStore && page.layoutManager != null) { +                page.layoutManager.scrollToPositionWithOffset(0, (int) scrollYOffset); +            } +        } +    } + +    private void syncBotsFolderStorePaddings() { +        if (viewPages == null) { +            return; +        } +        for (int i = 0; i < viewPages.length; i++) { +            if (viewPages[i] != null && viewPages[i].botsStoreView != null +                    && viewPages[i].botsStoreView.getVisibility() == View.VISIBLE) { +                syncBotsFolderStorePaddings(viewPages[i]); +            } +        } +    } + +    private void syncBotsFolderStorePaddings(ViewPage page) { +        syncBotsFolderStorePaddings(page, false); +    } + +    /** +     * @param alignToScrollY when true, pin grid to current {@link #scrollYOffset} (like dialogs list). +     *                       Never derive offset from chrome.getY() — that expands search on each swipe. +     */ +    private void syncBotsFolderStorePaddings(ViewPage page, boolean alignToScrollY) { +        if (page == null || page.botsStoreView == null || page.listView == null +                || page.botsStoreView.getVisibility() != View.VISIBLE) { +            return; +        } +        // DialogsRecyclerView is BlurredRecyclerView: getPaddingTop() == topPadding + blurTopPadding +        // with topMargin = -blurTopPadding. Grid uses plain topPadding + 8dp visual inset. +        final int top = page.listView.topPadding + AndroidUtilities.dp(8); +        final int bottom = page.listView.bottomPadding > 0 +                ? page.listView.bottomPadding +                : page.listView.getPaddingBottom(); +        final int prevTop = page.botsStoreView.getGridView() != null +                ? page.botsStoreView.getGridView().getPaddingTop() +                : -1; +        page.botsStoreView.syncListPaddings(top, bottom); +        if (alignToScrollY || prevTop != top) { +            // Same contract as dialogs list: item at paddingTop + scrollYOffset. +            // Extra 8dp lives in padding, so scrollY math stays stable (no chrome drift). +            page.botsStoreView.syncScrollToOffset((int) scrollYOffset); +        }      }        private boolean scrollBarVisible = true; @@ -7018,6 +7294,16 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.      @Override      public void onResume() {          super.onResume(); +        updateBotsFolderStoreMode(); +        // Returning from a bot chat: store stays VISIBLE so onShown() is skipped — refresh badges. +        if (viewPages != null) { +            for (int i = 0; i < viewPages.length; i++) { +                if (viewPages[i] != null && viewPages[i].botsStoreView != null +                        && viewPages[i].botsStoreView.getVisibility() == View.VISIBLE) { +                    viewPages[i].botsStoreView.refreshUnreadBadges(); +                } +            } +        }          if (dialogStoriesCell != null) {              dialogStoriesCell.onResume();          } @@ -7478,6 +7764,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.          }          searchIsShowed = show;          blur3_InvalidateBlur(); +        updateBotsFolderStoreMode();          if (show) {              boolean onlyDialogsAdapter;              if (searchFiltersWasShowed || forceNotOnlyDialogs) { @@ -7638,6 +7925,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                          searchViewPager.setBackground(null);                      }                      searchAnimator = null; +                    updateBotsFolderStoreMode();                  }                    @Override @@ -7650,6 +7938,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                              viewPages[0].listView.show();                          }                          searchAnimator = null; +                        updateBotsFolderStoreMode();                      }                  }              }); @@ -12106,6 +12395,13 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.              if (dialogStoriesCell != null) {                  dialogStoriesCell.updateColors();              } +            if (viewPages != null) { +                for (int i = 0; i < viewPages.length; i++) { +                    if (viewPages[i] != null && viewPages[i].botsStoreView != null) { +                        viewPages[i].botsStoreView.updateColors(); +                    } +                } +            }              if (logoDrawable != null) {                  logoDrawable.setColorFilter(getThemedColor(Theme.key_telegram_color_dialogsLogo), PorterDuff.Mode.MULTIPLY);              } @@ -13677,6 +13973,18 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.              return;          }   +        if (BotsFolderViewHelper.isBotsOnlyFilter(getCurrentFolderFilter())) { +            final boolean storeMode = BotsFolderViewHelper.isStoreMode(); +            io.add(storeMode ? R.drawable.msg_list : R.drawable.msg_media, +                    storeMode ? "Mini App home screen: On" : "Mini App home screen: Off", +                    () -> { +                        BotsFolderViewHelper.toggleStoreMode(); +                        updateBotsFolderStoreMode(); +                    }); +            io.add(R.drawable.msg_settings_old, getString(R.string.SettingsChat), () -> presentFragment(new ThemeActivity(ThemeActivity.THEME_TYPE_BASIC))); +            io.addGap(); +        } +          final boolean isCurrentThemeDark;          if (resourceProvider != null) {              isCurrentThemeDark = resourceProvider.isDark(); @@ -14285,6 +14593,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.                      viewPages[i].listView.setPadding(0, viewPages[i].listView.topPadding, 0, listPaddingBottom);                  }              } +            syncBotsFolderStorePaddings();          }      }   diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ThemeActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ThemeActivity.java index 4981227..b09537e 100644 --- a/TMessagesProj/src/main/java/org/telegram/ui/ThemeActivity.java +++ b/TMessagesProj/src/main/java/org/telegram/ui/ThemeActivity.java @@ -93,6 +93,7 @@ import org.telegram.ui.Cells.ThemePreviewMessagesCell;  import org.telegram.ui.Cells.ThemeTypeCell;  import org.telegram.ui.Cells.ThemesHorizontalListCell;  import org.telegram.ui.Components.AlertsCreator; +import org.telegram.ui.Components.BotsFolderViewHelper;  import org.telegram.ui.Components.BulletinFactory;  import org.telegram.ui.Components.CubicBezierInterpolator;  import org.telegram.ui.Components.LayoutHelper; @@ -201,6 +202,7 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No      private int bubbleRadiusInfoRow;      private int chatListHeaderRow;      private int chatListRow; +    private int miniAppsDesktopRow;      private int chatListInfoRow;      private int themeListRow;      private int themeListRow2; @@ -564,6 +566,7 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No          bubbleRadiusInfoRow = -1;          chatListHeaderRow = -1;          chatListRow = -1; +        miniAppsDesktopRow = -1;          chatListInfoRow = -1;          chatBlurRow = -1;          pauseOnRecordRow = -1; @@ -669,6 +672,7 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No                chatListHeaderRow = rowCount++;              chatListRow = rowCount++; +            miniAppsDesktopRow = rowCount++;              chatListInfoRow = rowCount++;                appIconHeaderRow = rowCount++; @@ -1315,6 +1319,11 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No                  if (view instanceof TextCheckCell) {                      ((TextCheckCell) view).setChecked(SharedConfig.directShare);                  } +            } else if (position == miniAppsDesktopRow) { +                BotsFolderViewHelper.toggleStoreMode(); +                if (view instanceof TextCheckCell) { +                    ((TextCheckCell) view).setChecked(BotsFolderViewHelper.isStoreMode()); +                }              } else if (position == sensitiveContentRow) {                  if (!getMessagesController().showSensitiveContent()) {                      Runnable set = () -> { @@ -2616,6 +2625,14 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No                          textCheckCell.setTextAndCheck(getString(R.string.PauseMusicOnMedia), SharedConfig.pauseMusicOnMedia, true);                      } else if (position == directShareRow) {                          textCheckCell.setTextAndValueAndCheck(getString("DirectShare", R.string.DirectShare), getString("DirectShareInfo", R.string.DirectShareInfo), SharedConfig.directShare, false, true); +                    } else if (position == miniAppsDesktopRow) { +                        textCheckCell.setTextAndValueAndCheck( +                                "Mini App home screen", +                                "Show bots folder as an app grid. Tap opens Mini App, long-press opens chat.", +                                BotsFolderViewHelper.isStoreMode(), +                                true, +                                true +                        );                      } else if (position == sensitiveContentRow) {                          textCheckCell.setTextAndValueAndCheck(getString(R.string.ShowSensitiveContent), getString(R.string.ShowSensitiveContentInfo), getMessagesController().showSensitiveContent(), true, true);                      } else if (position == chatBlurRow) { @@ -2753,7 +2770,8 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No                  return TYPE_BRIGHTNESS;              } else if (position == scheduleLocationRow || position == sendByEnterRow ||                      position == raiseToSpeakRow || position == raiseToListenRow || position == pauseOnRecordRow || -                    position == directShareRow || position == chatBlurRow || position == pauseOnMediaRow || position == nextMediaTapRow || position == sensitiveContentRow) { +                    position == directShareRow || position == chatBlurRow || position == pauseOnMediaRow || position == nextMediaTapRow || position == sensitiveContentRow || +                    position == miniAppsDesktopRow) {                  return TYPE_TEXT_CHECK;              } else if (position == textSizeRow) {                  return TYPE_TEXT_SIZE;
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
+index 0c5dc3f..c67b6d0 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
+@@ -186,6 +186,8 @@ import org.telegram.ui.Components.BlurredRecyclerView;
+ import org.telegram.ui.Components.ColoredImageSpan;
+ import org.telegram.ui.Components.DialogsActivityStatusLayout;
+ import org.telegram.ui.Components.DialogsActivityTopBubblesFadeView;
++import org.telegram.ui.Components.BotsFolderStoreView;
++import org.telegram.ui.Components.BotsFolderViewHelper;
+ import org.telegram.ui.Components.DialogsActivityTopPanelLayout;
+ import org.telegram.ui.Components.FragmentFloatingButton;
+ import org.telegram.ui.Components.FragmentSearchField;
+@@ -361,6 +363,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+     public class ViewPage extends FrameLayout {
+         public int pageAdditionalOffset;
+         public DialogsRecyclerView listView;
++        public BotsFolderStoreView botsStoreView;
+         public RecyclerListViewScroller scroller;
+         private LinearLayoutManager layoutManager;
+         private DialogsAdapter dialogsAdapter;
+@@ -957,6 +960,33 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+ 
+             if (invalidateScrollY && (rightSlidingDialogContainer == null || !rightSlidingDialogContainer.hasFragment()) && progressToActionMode == 0) {
+                 invalidateScrollY = false;
++                // Do not drive chrome scrollY from the Mini App grid during folder swipe —
++                // align/reload would expand stories/search a bit on every page change.
++                final boolean botsStoreDrivingScroll = viewPages[0] != null
++                        && viewPages[0].botsStoreView != null
++                        && viewPages[0].botsStoreView.getVisibility() == View.VISIBLE
++                        && !tabsAnimationInProgress
++                        && !startedTracking
++                        && !maybeStartTracking;
++                if (botsStoreDrivingScroll) {
++                    Float visiblePartAfterScroll = viewPages[0].botsStoreView.computeVisiblePartAfterScroll();
++                    if (visiblePartAfterScroll != null) {
++                        if (visiblePartAfterScroll >= 0) {
++                            int maxScrollYOffset = getMaxScrollYOffset();
++                            float newTranslation = -visiblePartAfterScroll;
++                            if (newTranslation < -maxScrollYOffset) {
++                                newTranslation = -maxScrollYOffset;
++                            } else if (newTranslation > 0) {
++                                newTranslation = 0;
++                            }
++                            DialogsActivity.this.setScrollY(newTranslation);
++                        }
++                        // Do not setScrollY(0) on negative/unready readings — that expands search.
++                    }
++                } else if (viewPages[0] != null && viewPages[0].botsStoreView != null
++                        && viewPages[0].botsStoreView.getVisibility() == View.VISIBLE) {
++                    // Folder swipe in progress with store visible — leave scrollY alone.
++                } else {
+                 int firstItemPosition = hasHiddenArchive() && viewPages[0].dialogsType == DIALOGS_TYPE_DEFAULT ? 1 : 0;
+                 DialogsRecyclerView recyclerView = viewPages[0].listView;
+                 if (fixScrollYAfterArchiveOpened) {
+@@ -1000,6 +1030,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                 } else {
+                     DialogsActivity.this.setScrollY(-getMaxScrollYOffset());
+                 }
++                }
+             }
+             final int actionBarHeight = getActionBarFullHeight();
+             final int top;
+@@ -1490,33 +1521,30 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                             }
+                         }
+                         float dx;
++                        final float page0TargetX;
++                        final float page1TargetX;
+                         if (backAnimation) {
+                             dx = Math.abs(x);
++                            page0TargetX = 0;
+                             if (animatingForward) {
+-                                tabsAnimation.playTogether(
+-                                        ObjectAnimator.ofFloat(viewPages[0], View.TRANSLATION_X, 0),
+-                                        ObjectAnimator.ofFloat(viewPages[1], View.TRANSLATION_X, viewPages[1].getMeasuredWidth())
+-                                );
++                                page1TargetX = viewPages[1].getMeasuredWidth();
+                             } else {
+-                                tabsAnimation.playTogether(
+-                                        ObjectAnimator.ofFloat(viewPages[0], View.TRANSLATION_X, 0),
+-                                        ObjectAnimator.ofFloat(viewPages[1], View.TRANSLATION_X, -viewPages[1].getMeasuredWidth())
+-                                );
++                                page1TargetX = -viewPages[1].getMeasuredWidth();
+                             }
+                         } else {
+                             dx = viewPages[0].getMeasuredWidth() - Math.abs(x);
+                             if (animatingForward) {
+-                                tabsAnimation.playTogether(
+-                                        ObjectAnimator.ofFloat(viewPages[0], View.TRANSLATION_X, -viewPages[0].getMeasuredWidth()),
+-                                        ObjectAnimator.ofFloat(viewPages[1], View.TRANSLATION_X, 0)
+-                                );
++                                page0TargetX = -viewPages[0].getMeasuredWidth();
++                                page1TargetX = 0;
+                             } else {
+-                                tabsAnimation.playTogether(
+-                                        ObjectAnimator.ofFloat(viewPages[0], View.TRANSLATION_X, viewPages[0].getMeasuredWidth()),
+-                                        ObjectAnimator.ofFloat(viewPages[1], View.TRANSLATION_X, 0)
+-                                );
++                                page0TargetX = viewPages[0].getMeasuredWidth();
++                                page1TargetX = 0;
+                             }
+                         }
++                        tabsAnimation.playTogether(
++                                ObjectAnimator.ofFloat(viewPages[0], View.TRANSLATION_X, page0TargetX),
++                                ObjectAnimator.ofFloat(viewPages[1], View.TRANSLATION_X, page1TargetX)
++                        );
+                         tabsAnimation.setInterpolator(interpolator);
+ 
+                         int width = getMeasuredWidth();
+@@ -1554,6 +1582,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                                 actionBar.setEnabled(true);
+                                 filterTabsView.setEnabled(true);
+                                 checkListLoad(viewPages[0]);
++                                updateBotsFolderStoreMode();
+                             }
+                         });
+                         tabsAnimation.start();
+@@ -2100,6 +2129,11 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                         getChildAt(i).requestLayout();
+                     }
+                 }
++                // Keep Mini App grid padding identical whenever list padding changes
++                // (stories collapse, birthday panel, filter tabs).
++                if (parentPage.botsStoreView != null && parentPage.botsStoreView.getVisibility() == View.VISIBLE) {
++                    syncBotsFolderStorePaddings(parentPage);
++                }
+             }
+             ignoreLayout = false;
+ 
+@@ -3318,6 +3352,8 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+             @Override
+             public void onSearchExpand() {
+                 searching = true;
++                // Leave Mini App desktop immediately so icons never sit above search UI.
++                updateBotsFolderStoreMode();
+                 if (switchItem != null) {
+                     switchItem.setVisibility(View.GONE);
+                 }
+@@ -3392,6 +3428,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                 updateFloatingButtonVisibility(true);
+                 checkUi_mainTabsVisible();
+                 blur3_InvalidateBlur();
++                updateBotsFolderStoreMode();
+             }
+ 
+             @Override
+@@ -3662,6 +3699,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                         checkListLoad(viewPages[0]);
+                         viewPages[0].dialogsAdapter.resume();
+                         viewPages[1].dialogsAdapter.pause();
++                        updateBotsFolderStoreMode();
+                     }
+                 }
+ 
+@@ -4028,6 +4066,18 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+ 
+             for (ViewPage viewPage : viewPages) {
+                 if (viewPage != null && viewPage.getVisibility() == View.VISIBLE && viewPage.getAlpha() > 0f) {
++                    if (viewPage.botsStoreView != null && viewPage.botsStoreView.getVisibility() == View.VISIBLE
++                            && viewPage.botsStoreView.getGridView() != null) {
++                        Blur3Utils.captureRelativeParent(
++                                viewPage.botsStoreView.getGridView(),
++                                canvas,
++                                position,
++                                viewPage.botsStoreView.getGridView(),
++                                contentView,
++                                255 - searchViewAlpha
++                        );
++                        continue;
++                    }
+                     float rp = getRightSlidingProgress();
+                     if (viewPage.animationSupportListView != null && rp > 0) {
+                         if (!ViewPositionWatcher.computeCoordinatesInParent(viewPage.listView, contentView, tmpPoint)) {
+@@ -4365,6 +4415,9 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+             viewPage.listView.setLayoutManager(viewPage.layoutManager);
+             viewPage.listView.setVerticalScrollbarPosition(LocaleController.isRTL ? RecyclerListView.SCROLLBAR_POSITION_LEFT : RecyclerListView.SCROLLBAR_POSITION_RIGHT);
+             viewPage.addView(viewPage.listView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
++            if (initialDialogsType == DIALOGS_TYPE_DEFAULT && !onlySelect && folderId == 0 && communityId == 0) {
++                attachBotsFolderStoreView(viewPage, context);
++            }
+             viewPage.listView.setOnItemClickListener((view, position, x, y) -> {
+                 if (view instanceof GraySectionCell)
+                     return;
+@@ -4787,6 +4840,8 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+             topPanelLayout = new DialogsActivityTopPanelLayout(context);
+             topPanelLayout.setOnAnimatedHeightChangedListener(() -> {
+                 viewPages[0].listView.requestLayout();
++                // Birthday / hint panel height feeds list padding — keep Mini App grid in sync.
++                AndroidUtilities.runOnUIThread(this::syncBotsFolderStorePaddings);
+ 
+                 TopicsFragment topicsFragment = null;
+                 if (rightSlidingDialogContainer != null && rightSlidingDialogContainer.getFragment() instanceof TopicsFragment) {
+@@ -5588,8 +5643,10 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+         };
+         updateFilterTabs(true, false);
+         rightSlidingDialogContainer.setOpenProgress(0f);
++
+         contentView.addView(dialogStoriesCell, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, DialogStoriesCell.HEIGHT_IN_DP));
+         contentView.addView(rightSlidingDialogContainer, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
++        updateBotsFolderStoreMode();
+ 
+         dialogsActivityStatusLayout = new DialogsActivityStatusLayout(context);
+         // contentView.addView(dialogsActivityStatusLayout, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP));
+@@ -6827,6 +6884,225 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+         viewPages[a].dialogsAdapter.setDialogsType(viewPages[a].dialogsType);
+         viewPages[a].layoutManager.scrollToPositionWithOffset(viewPages[a].dialogsType == DIALOGS_TYPE_DEFAULT && hasHiddenArchive() && viewPages[a].archivePullViewState == ARCHIVE_ITEM_STATE_HIDDEN ? 1 : 0, (int) scrollYOffset);
+         checkListLoad(viewPages[a]);
++        // Desktop grid lives inside ViewPage — update only the page being configured.
++        updateBotsFolderStoreModeForPage(viewPages[a], filter);
++    }
++
++    private void attachBotsFolderStoreView(ViewPage page, Context context) {
++        if (page == null || page.botsStoreView != null || context == null) {
++            return;
++        }
++        page.botsStoreView = new BotsFolderStoreView(context, currentAccount, resourceProvider, new BotsFolderStoreView.Callback() {
++            @Override
++            public void onOpenBot(TLRPC.User bot) {
++                getMessagesController().openApp(DialogsActivity.this, bot, null, 0, null);
++            }
++
++            @Override
++            public void onOpenBotChat(TLRPC.User bot) {
++                if (bot == null) {
++                    return;
++                }
++                Bundle args = new Bundle();
++                args.putLong("user_id", bot.id);
++                presentFragment(new ChatActivity(args));
++            }
++        });
++        page.botsStoreView.setOnScrollInvalidate(() -> {
++            invalidateScrollY = true;
++            if (fragmentView != null) {
++                fragmentView.invalidate();
++            }
++        });
++        page.botsStoreView.getGridView().addOnScrollListener(new RecyclerView.OnScrollListener() {
++            private boolean wasManualScroll;
++            private int prevPosition = -1;
++            private int prevTop;
++            private boolean scrollUpdated;
++
++            @Override
++            public void onScrollStateChanged(RecyclerView recyclerView, int newState) {
++                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
++                    wasManualScroll = true;
++                    scrollingManually = true;
++                } else {
++                    scrollingManually = false;
++                }
++                if (newState == RecyclerView.SCROLL_STATE_IDLE) {
++                    wasManualScroll = false;
++                }
++            }
++
++            @Override
++            public void onScrolled(RecyclerView recyclerView, int dx, int dy) {
++                if (fragmentView instanceof ContentView) {
++                    ((ContentView) fragmentView).updateBlurContent();
++                }
++                blur3_InvalidateBlur();
++                invalidateScrollY = true;
++                if (fragmentView != null) {
++                    fragmentView.invalidate();
++                }
++                if (!wasManualScroll || recyclerView.getChildCount() <= 0) {
++                    return;
++                }
++                int firstVisiblePosition = -1;
++                for (int i = 0; i < recyclerView.getChildCount(); i++) {
++                    int position = recyclerView.getChildAdapterPosition(recyclerView.getChildAt(i));
++                    if (position >= 0 && (firstVisiblePosition == -1 || position < firstVisiblePosition)) {
++                        firstVisiblePosition = position;
++                    }
++                }
++                if (firstVisiblePosition == RecyclerView.NO_POSITION || firstVisiblePosition < 0) {
++                    return;
++                }
++                RecyclerView.ViewHolder holder = recyclerView.findViewHolderForAdapterPosition(firstVisiblePosition);
++                int firstViewTop = holder != null ? holder.itemView.getTop() : 0;
++                boolean goingDown;
++                boolean changed = true;
++                if (prevPosition == firstVisiblePosition) {
++                    goingDown = firstViewTop < prevTop;
++                    changed = Math.abs(prevTop - firstViewTop) > 1;
++                } else {
++                    goingDown = firstVisiblePosition > prevPosition;
++                }
++                if (changed && scrollUpdated && (goingDown || scrollingManually)) {
++                    hideFloatingButton(goingDown);
++                }
++                prevPosition = firstVisiblePosition;
++                prevTop = firstViewTop;
++                scrollUpdated = true;
++            }
++        });
++        page.botsStoreView.setVisibility(View.GONE);
++        page.addView(page.botsStoreView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
++    }
++
++    private MessagesController.DialogFilter getCurrentFolderFilter() {
++        return getFilterForPage(viewPages != null && viewPages.length > 0 ? viewPages[0] : null);
++    }
++
++    private MessagesController.DialogFilter getFilterForPage(ViewPage page) {
++        if (page == null) {
++            return null;
++        }
++        final int dialogsType = page.dialogsType;
++        if (dialogsType != 7 && dialogsType != 8) {
++            return null;
++        }
++        return getMessagesController().selectedDialogFilter[dialogsType - 7];
++    }
++
++    private boolean shouldShowBotsFolderStore(MessagesController.DialogFilter filter) {
++        return BotsFolderViewHelper.isBotsOnlyFilter(filter)
++                && BotsFolderViewHelper.isStoreMode()
++                && !searching
++                && !searchIsShowed
++                && actionBar != null
++                && !actionBar.isActionModeShowed();
++    }
++
++    private void updateBotsFolderStoreMode() {
++        if (viewPages == null) {
++            return;
++        }
++        for (int i = 0; i < viewPages.length; i++) {
++            if (viewPages[i] != null) {
++                updateBotsFolderStoreModeForPage(viewPages[i], getFilterForPage(viewPages[i]));
++            }
++        }
++    }
++
++    private void updateBotsFolderStoreMode(MessagesController.DialogFilter filter) {
++        if (viewPages == null || viewPages.length == 0 || viewPages[0] == null) {
++            return;
++        }
++        updateBotsFolderStoreModeForPage(viewPages[0], filter);
++    }
++
++    private void updateBotsFolderStoreModeForPage(ViewPage page, MessagesController.DialogFilter filter) {
++        if (page == null || page.botsStoreView == null || page.listView == null) {
++            return;
++        }
++        final boolean showStore = shouldShowBotsFolderStore(filter);
++        if (showStore) {
++            final boolean becameVisible = page.botsStoreView.getVisibility() != View.VISIBLE;
++            // Keep listView in hierarchy (INVISIBLE) so ViewPage swipe geometry stays stable,
++            // but draw the desktop grid as the page content — sibling of listView, not overlay.
++            page.listView.setVisibility(View.INVISIBLE);
++            page.listView.setAlpha(0f);
++            if (page.progressView != null) {
++                page.progressView.setVisibility(View.GONE);
++            }
++            page.botsStoreView.setVisibility(View.VISIBLE);
++            // Keep hidden list scrolled with chrome so leaving Apps does not expand search.
++            if (page.layoutManager != null) {
++                page.layoutManager.scrollToPositionWithOffset(0, (int) scrollYOffset);
++            }
++            if (becameVisible) {
++                page.botsStoreView.onShown((int) scrollYOffset);
++            }
++            syncBotsFolderStorePaddings(page, true);
++            if (becameVisible) {
++                final ViewPage storePage = page;
++                page.botsStoreView.post(() -> {
++                    if (storePage.botsStoreView != null
++                            && storePage.botsStoreView.getVisibility() == View.VISIBLE) {
++                        syncBotsFolderStorePaddings(storePage, true);
++                    }
++                });
++            }
++        } else {
++            final boolean wasStore = page.botsStoreView.getVisibility() == View.VISIBLE;
++            page.botsStoreView.setVisibility(View.GONE);
++            page.listView.setVisibility(View.VISIBLE);
++            page.listView.setAlpha(1f);
++            if (wasStore && page.layoutManager != null) {
++                page.layoutManager.scrollToPositionWithOffset(0, (int) scrollYOffset);
++            }
++        }
++    }
++
++    private void syncBotsFolderStorePaddings() {
++        if (viewPages == null) {
++            return;
++        }
++        for (int i = 0; i < viewPages.length; i++) {
++            if (viewPages[i] != null && viewPages[i].botsStoreView != null
++                    && viewPages[i].botsStoreView.getVisibility() == View.VISIBLE) {
++                syncBotsFolderStorePaddings(viewPages[i]);
++            }
++        }
++    }
++
++    private void syncBotsFolderStorePaddings(ViewPage page) {
++        syncBotsFolderStorePaddings(page, false);
++    }
++
++    /**
++     * @param alignToScrollY when true, pin grid to current {@link #scrollYOffset} (like dialogs list).
++     *                       Never derive offset from chrome.getY() — that expands search on each swipe.
++     */
++    private void syncBotsFolderStorePaddings(ViewPage page, boolean alignToScrollY) {
++        if (page == null || page.botsStoreView == null || page.listView == null
++                || page.botsStoreView.getVisibility() != View.VISIBLE) {
++            return;
++        }
++        // DialogsRecyclerView is BlurredRecyclerView: getPaddingTop() == topPadding + blurTopPadding
++        // with topMargin = -blurTopPadding. Grid uses plain topPadding + 8dp visual inset.
++        final int top = page.listView.topPadding + AndroidUtilities.dp(8);
++        final int bottom = page.listView.bottomPadding > 0
++                ? page.listView.bottomPadding
++                : page.listView.getPaddingBottom();
++        final int prevTop = page.botsStoreView.getGridView() != null
++                ? page.botsStoreView.getGridView().getPaddingTop()
++                : -1;
++        page.botsStoreView.syncListPaddings(top, bottom);
++        if (alignToScrollY || prevTop != top) {
++            // Same contract as dialogs list: item at paddingTop + scrollYOffset.
++            // Extra 8dp lives in padding, so scrollY math stays stable (no chrome drift).
++            page.botsStoreView.syncScrollToOffset((int) scrollYOffset);
++        }
+     }
+ 
+     private boolean scrollBarVisible = true;
+@@ -7018,6 +7294,16 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+     @Override
+     public void onResume() {
+         super.onResume();
++        updateBotsFolderStoreMode();
++        // Returning from a bot chat: store stays VISIBLE so onShown() is skipped — refresh badges.
++        if (viewPages != null) {
++            for (int i = 0; i < viewPages.length; i++) {
++                if (viewPages[i] != null && viewPages[i].botsStoreView != null
++                        && viewPages[i].botsStoreView.getVisibility() == View.VISIBLE) {
++                    viewPages[i].botsStoreView.refreshUnreadBadges();
++                }
++            }
++        }
+         if (dialogStoriesCell != null) {
+             dialogStoriesCell.onResume();
+         }
+@@ -7478,6 +7764,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+         }
+         searchIsShowed = show;
+         blur3_InvalidateBlur();
++        updateBotsFolderStoreMode();
+         if (show) {
+             boolean onlyDialogsAdapter;
+             if (searchFiltersWasShowed || forceNotOnlyDialogs) {
+@@ -7638,6 +7925,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                         searchViewPager.setBackground(null);
+                     }
+                     searchAnimator = null;
++                    updateBotsFolderStoreMode();
+                 }
+ 
+                 @Override
+@@ -7650,6 +7938,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                             viewPages[0].listView.show();
+                         }
+                         searchAnimator = null;
++                        updateBotsFolderStoreMode();
+                     }
+                 }
+             });
+@@ -12106,6 +12395,13 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+             if (dialogStoriesCell != null) {
+                 dialogStoriesCell.updateColors();
+             }
++            if (viewPages != null) {
++                for (int i = 0; i < viewPages.length; i++) {
++                    if (viewPages[i] != null && viewPages[i].botsStoreView != null) {
++                        viewPages[i].botsStoreView.updateColors();
++                    }
++                }
++            }
+             if (logoDrawable != null) {
+                 logoDrawable.setColorFilter(getThemedColor(Theme.key_telegram_color_dialogsLogo), PorterDuff.Mode.MULTIPLY);
+             }
+@@ -13677,6 +13973,18 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+             return;
+         }
+ 
++        if (BotsFolderViewHelper.isBotsOnlyFilter(getCurrentFolderFilter())) {
++            final boolean storeMode = BotsFolderViewHelper.isStoreMode();
++            io.add(storeMode ? R.drawable.msg_list : R.drawable.msg_media,
++                    storeMode ? "Mini App home screen: On" : "Mini App home screen: Off",
++                    () -> {
++                        BotsFolderViewHelper.toggleStoreMode();
++                        updateBotsFolderStoreMode();
++                    });
++            io.add(R.drawable.msg_settings_old, getString(R.string.SettingsChat), () -> presentFragment(new ThemeActivity(ThemeActivity.THEME_TYPE_BASIC)));
++            io.addGap();
++        }
++
+         final boolean isCurrentThemeDark;
+         if (resourceProvider != null) {
+             isCurrentThemeDark = resourceProvider.isDark();
+@@ -14285,6 +14593,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                     viewPages[i].listView.setPadding(0, viewPages[i].listView.topPadding, 0, listPaddingBottom);
+                 }
+             }
++            syncBotsFolderStorePaddings();
+         }
+     }
+ 
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ThemeActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ThemeActivity.java
+index 4981227..b09537e 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ThemeActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ThemeActivity.java
+@@ -93,6 +93,7 @@ import org.telegram.ui.Cells.ThemePreviewMessagesCell;
+ import org.telegram.ui.Cells.ThemeTypeCell;
+ import org.telegram.ui.Cells.ThemesHorizontalListCell;
+ import org.telegram.ui.Components.AlertsCreator;
++import org.telegram.ui.Components.BotsFolderViewHelper;
+ import org.telegram.ui.Components.BulletinFactory;
+ import org.telegram.ui.Components.CubicBezierInterpolator;
+ import org.telegram.ui.Components.LayoutHelper;
+@@ -201,6 +202,7 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No
+     private int bubbleRadiusInfoRow;
+     private int chatListHeaderRow;
+     private int chatListRow;
++    private int miniAppsDesktopRow;
+     private int chatListInfoRow;
+     private int themeListRow;
+     private int themeListRow2;
+@@ -564,6 +566,7 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No
+         bubbleRadiusInfoRow = -1;
+         chatListHeaderRow = -1;
+         chatListRow = -1;
++        miniAppsDesktopRow = -1;
+         chatListInfoRow = -1;
+         chatBlurRow = -1;
+         pauseOnRecordRow = -1;
+@@ -669,6 +672,7 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No
+ 
+             chatListHeaderRow = rowCount++;
+             chatListRow = rowCount++;
++            miniAppsDesktopRow = rowCount++;
+             chatListInfoRow = rowCount++;
+ 
+             appIconHeaderRow = rowCount++;
+@@ -1315,6 +1319,11 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No
+                 if (view instanceof TextCheckCell) {
+                     ((TextCheckCell) view).setChecked(SharedConfig.directShare);
+                 }
++            } else if (position == miniAppsDesktopRow) {
++                BotsFolderViewHelper.toggleStoreMode();
++                if (view instanceof TextCheckCell) {
++                    ((TextCheckCell) view).setChecked(BotsFolderViewHelper.isStoreMode());
++                }
+             } else if (position == sensitiveContentRow) {
+                 if (!getMessagesController().showSensitiveContent()) {
+                     Runnable set = () -> {
+@@ -2616,6 +2625,14 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No
+                         textCheckCell.setTextAndCheck(getString(R.string.PauseMusicOnMedia), SharedConfig.pauseMusicOnMedia, true);
+                     } else if (position == directShareRow) {
+                         textCheckCell.setTextAndValueAndCheck(getString("DirectShare", R.string.DirectShare), getString("DirectShareInfo", R.string.DirectShareInfo), SharedConfig.directShare, false, true);
++                    } else if (position == miniAppsDesktopRow) {
++                        textCheckCell.setTextAndValueAndCheck(
++                                "Mini App home screen",
++                                "Show bots folder as an app grid. Tap opens Mini App, long-press opens chat.",
++                                BotsFolderViewHelper.isStoreMode(),
++                                true,
++                                true
++                        );
+                     } else if (position == sensitiveContentRow) {
+                         textCheckCell.setTextAndValueAndCheck(getString(R.string.ShowSensitiveContent), getString(R.string.ShowSensitiveContentInfo), getMessagesController().showSensitiveContent(), true, true);
+                     } else if (position == chatBlurRow) {
+@@ -2753,7 +2770,8 @@ public class ThemeActivity extends BaseFragment implements NotificationCenter.No
+                 return TYPE_BRIGHTNESS;
+             } else if (position == scheduleLocationRow || position == sendByEnterRow ||
+                     position == raiseToSpeakRow || position == raiseToListenRow || position == pauseOnRecordRow ||
+-                    position == directShareRow || position == chatBlurRow || position == pauseOnMediaRow || position == nextMediaTapRow || position == sensitiveContentRow) {
++                    position == directShareRow || position == chatBlurRow || position == pauseOnMediaRow || position == nextMediaTapRow || position == sensitiveContentRow ||
++                    position == miniAppsDesktopRow) {
+                 return TYPE_TEXT_CHECK;
+             } else if (position == textSizeRow) {
+                 return TYPE_TEXT_SIZE;

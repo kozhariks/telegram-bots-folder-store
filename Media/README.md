@@ -1,8 +1,10 @@
-# Demo media
+# Media
 
-Place concept recordings here (Designers style):
+Drop demo recordings here for [@designers](https://t.me/designers) submission:
 
-* `android.mp4` — bots folder grid on Android
-* `ios.mp4` — bots folder grid on iOS
+| File | Platform |
+|---|---|
+| `ios.mp4` | Mini App home screen on iOS |
+| `android.mp4` | Mini App home screen on Android |
 
-Suggested: 1920×1920, 60 fps, short loop showing folder → grid → tap chat → long-press Mini App → settings toggle.
+Usual format in concept repos: **1920×1920**, 60 fps, screen recording of the real build (not a mockup).

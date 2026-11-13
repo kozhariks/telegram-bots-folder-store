@@ -14,7 +14,7 @@ Telegram concept for **iOS** (UIKit / AsyncDisplayKit) and **Android** (Java, Te
 | Platform | Build |
 |---|---|
 | **Android** | [tezam-bots-folder-android-afat-debug.apk](https://github.com/kozhariks/telegram-bots-folder-store/releases/download/v0.1.0-android/tezam-bots-folder-android-afat-debug.apk) — [Release page](https://github.com/kozhariks/telegram-bots-folder-store/releases/tag/v0.1.0-android) |
-| **iOS** | No IPA yet (needs Mac / TestFlight). Source + patch are below. |
+| **iOS** | Built on GitHub Actions (unsigned IPA). [Actions → Build iOS](https://github.com/kozhariks/telegram-bots-folder-store/actions/workflows/build-ios.yml) · Releases appear as `v0.1.0-ios-*`. Sideload via AltStore / Sideloadly. |
 
 | Path | What |
 |---|---|

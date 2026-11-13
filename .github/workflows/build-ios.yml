@@ -110,20 +110,26 @@ jobs:
           from pathlib import Path
           p = Path("build-system/Make/Make.py")
           text = p.read_text()
-          needle = (
-              "    bazel_command_line.set_profile_swift(arguments.profileSwift)\n\n"
-              "    bazel_command_line.invoke_build()"
-          )
-          repl = (
-              "    bazel_command_line.set_profile_swift(arguments.profileSwift)\n"
+          anchor = "bazel_command_line.invoke_build()"
+          insert = (
               "    # CI: fake profiles expired; unsigned IPA for sideload\n"
-              "    bazel_command_line.set_disable_provisioning_profiles()\n\n"
-              "    bazel_command_line.invoke_build()"
+              "    bazel_command_line.set_disable_provisioning_profiles()\n"
           )
-          if needle not in text:
-              raise SystemExit("Make.py patch anchor not found")
-          p.write_text(text.replace(needle, repl, 1))
-          print("Patched Make.py build() → set_disable_provisioning_profiles()")
+          # Prefer the build() call site (first invoke_build after set_split_swiftmodules).
+          marker = "bazel_command_line.set_split_swiftmodules(arguments.enableParallelSwiftmoduleGeneration)"
+          idx = text.find(marker)
+          if idx < 0:
+              raise SystemExit("Make.py set_split_swiftmodules anchor not found")
+          inv = text.find(anchor, idx)
+          if inv < 0:
+              raise SystemExit("Make.py invoke_build after set_split_swiftmodules not found")
+          # Idempotent
+          if "set_disable_provisioning_profiles()" in text[idx:inv]:
+              print("Already patched")
+          else:
+              text = text[:inv] + insert + text[inv:]
+              p.write_text(text)
+              print("Patched Make.py build() → set_disable_provisioning_profiles()")
           PY
 
       - name: Select Xcode

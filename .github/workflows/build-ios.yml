@@ -216,36 +216,24 @@ jobs:
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_telegram_bots"
           BUILD_NUMBER="${{ github.run_number }}"
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs || true
-          # Xcode 26.6 Swift crashes compiling ShareScreen under WMO (OSSACompleteLifetime).
-          # Tip targets Xcode 27.1; drop WMO/osize so the IPA still builds on 26.6.
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("build-system/Make/Make.py")
-          text = p.read_text()
-          for line in (
-              "            '--features=swift.opt_uses_wmo',\n",
-              "            '--features=swift.opt_uses_osize',\n",
-          ):
-              if line not in text:
-                  raise SystemExit(f"Make.py missing expected feature line: {line!r}")
-              text = text.replace(line, "", 1)
-          p.write_text(text)
-          print("Disabled swift.opt_uses_wmo / swift.opt_uses_osize for Xcode 26.6")
-          PY
-          # Match upstream Telegram-iOS CI: fake-codesigning → unsigned IPA.
+          # Tip wants Xcode 27.1; macos-26 has 26.6 whose opt Swift crashes (ShareScreen /
+          # RichTextEditor SIL). Build debug_arm64 IPA for sideload instead of release_arm64.
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             --overrideXcodeVersion \
             build \
             --configurationPath=build-system/tezam-configuration.json \
             --codesigningInformationPath=build-system/fake-codesigning \
-            --configuration=release_arm64 \
+            --configuration=debug_arm64 \
             --buildNumber="$BUILD_NUMBER"
 
           OUTPUT_PATH="$SOURCE_DIR/build/artifacts"
           mkdir -p "$OUTPUT_PATH"
           shopt -s nullglob
-          IPAS=(bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa)
+          IPAS=(bazel-out/applebin_ios-ios_arm*-dbg-ST-*/bin/Telegram/Telegram.ipa)
+          if [[ ${#IPAS[@]} -eq 0 ]]; then
+            IPAS=(bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa)
+          fi
           if [[ ${#IPAS[@]} -eq 0 ]]; then
             # Fallback: any Telegram.ipa under bazel-out
             IPAS=( $(find bazel-out -name 'Telegram.ipa' 2>/dev/null | head -n 5) )
@@ -280,7 +268,8 @@ jobs:
             --title "v0.1.0 — iOS unsigned IPA (#${{ github.run_number }})" \
             --notes "$(cat <<'EOF'
           ## iOS
-          Unsigned IPA (fake-codesigning), same style as official Telegram-iOS CI.
+          Unsigned **debug** IPA (fake-codesigning). Built with Xcode 26.6 /
+          `debug_arm64` because tip release opts need Xcode 27.1.
 
           Install via Sideloadly / AltStore / your Apple Developer resign.
 

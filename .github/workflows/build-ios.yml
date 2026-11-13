@@ -113,6 +113,8 @@ jobs:
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_telegram_bots"
           BUILD_NUMBER="${{ github.run_number }}"
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs || true
+          # Match upstream Telegram-iOS CI: fake-codesigning → unsigned IPA.
+          # (--disableProvisioningProfiles is only for generateProject, not build)
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             --overrideXcodeVersion \
@@ -120,8 +122,7 @@ jobs:
             --configurationPath=build-system/tezam-configuration.json \
             --codesigningInformationPath=build-system/fake-codesigning \
             --configuration=release_arm64 \
-            --buildNumber="$BUILD_NUMBER" \
-            --disableProvisioningProfiles
+            --buildNumber="$BUILD_NUMBER"
 
           OUTPUT_PATH="$SOURCE_DIR/build/artifacts"
           mkdir -p "$OUTPUT_PATH"

@@ -110,26 +110,22 @@ jobs:
           from pathlib import Path
           p = Path("build-system/Make/Make.py")
           text = p.read_text()
-          anchor = "bazel_command_line.invoke_build()"
-          insert = (
-              "    # CI: fake profiles expired; unsigned IPA for sideload\n"
-              "    bazel_command_line.set_disable_provisioning_profiles()\n"
+          old = (
+              "        if self.disable_provisioning_profiles:\n"
+              "            combined_arguments += ['--//Telegram:disableProvisioningProfiles']\n"
           )
-          # Prefer the build() call site (first invoke_build after set_split_swiftmodules).
-          marker = "bazel_command_line.set_split_swiftmodules(arguments.enableParallelSwiftmoduleGeneration)"
-          idx = text.find(marker)
-          if idx < 0:
-              raise SystemExit("Make.py set_split_swiftmodules anchor not found")
-          inv = text.find(anchor, idx)
-          if inv < 0:
-              raise SystemExit("Make.py invoke_build after set_split_swiftmodules not found")
-          # Idempotent
-          if "set_disable_provisioning_profiles()" in text[idx:inv]:
+          new = (
+              "        # CI: upstream fake profiles expired 2026-10-30; always skip for unsigned IPA\n"
+              "        if True or self.disable_provisioning_profiles:\n"
+              "            combined_arguments += ['--//Telegram:disableProvisioningProfiles']\n"
+          )
+          if "if True or self.disable_provisioning_profiles:" in text:
               print("Already patched")
+          elif old not in text:
+              raise SystemExit("Make.py disable_provisioning_profiles anchor not found")
           else:
-              text = text[:inv] + insert + text[inv:]
-              p.write_text(text)
-              print("Patched Make.py build() → set_disable_provisioning_profiles()")
+              p.write_text(text.replace(old, new, 1))
+              print("Patched Make.py invoke_build → always --//Telegram:disableProvisioningProfiles")
           PY
 
       - name: Select Xcode

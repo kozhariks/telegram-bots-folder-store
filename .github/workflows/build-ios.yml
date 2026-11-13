@@ -1,0 +1,161 @@
+name: Build iOS
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ios/**'
+      - '.github/workflows/build-ios.yml'
+
+# Public repo: macOS minutes are free (with fair-use limits).
+# Produces an unsigned IPA (fake-codesigning), same approach as TelegramMessenger/Telegram-iOS CI.
+# Sideload with your Apple ID (AltStore / Sideloadly) or resign for TestFlight.
+
+env:
+  TELEGRAM_IOS_REF: '24638bc69bd083981b178dd1e7f921eebbf7fc46'
+  SOURCE_DIR: /Users/Shared/telegram-ios
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout feature repo
+        uses: actions/checkout@v4
+        with:
+          path: feature
+
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator || true
+          brew cleanup -s || true
+          df -h /
+
+      - name: Clone Telegram-iOS (shallow + submodules)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /Users/Shared
+          sudo chown -R "$(whoami)" /Users/Shared
+          git clone --filter=blob:none --no-checkout https://github.com/TelegramMessenger/Telegram-iOS.git "$SOURCE_DIR"
+          cd "$SOURCE_DIR"
+          git checkout "$TELEGRAM_IOS_REF"
+          git submodule update --init --recursive --depth 1 --jobs 8
+          df -h /
+
+      - name: Apply bots-folder feature
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          cp -R "$GITHUB_WORKSPACE/feature/ios/Feature/submodules/." submodules/
+          git apply --whitespace=fix "$GITHUB_WORKSPACE/feature/ios/Integration/telegram-ios.patch"
+          echo "Patched tree ready."
+          git status -sb | head -n 40
+
+      - name: Write build configuration
+        env:
+          API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${API_ID}" || -z "${API_HASH}" ]]; then
+            echo "Missing secrets TELEGRAM_API_ID / TELEGRAM_API_HASH" >&2
+            exit 1
+          fi
+          cat > "$SOURCE_DIR/build-system/tezam-configuration.json" <<EOF
+          {
+            "bundle_id": "by.tezam.Telegram",
+            "api_id": "${API_ID}",
+            "api_hash": "${API_HASH}",
+            "team_id": "0",
+            "is_internal_build": "true",
+            "is_appstore_build": "false",
+            "appstore_id": "0",
+            "app_specific_url_scheme": "tg",
+            "premium_iap_product_id": "",
+            "enable_siri": false,
+            "enable_icloud": false
+          }
+          EOF
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          ls /Applications | grep -i Xcode || true
+          # Prefer versions.json if that Xcode exists; otherwise newest installed.
+          WANT=$(python3 -c 'import json; print(json.load(open("'"$SOURCE_DIR"'/versions.json"))["xcode"])')
+          if [[ -d "/Applications/Xcode_${WANT}.app" ]]; then
+            sudo xcode-select -s "/Applications/Xcode_${WANT}.app/Contents/Developer"
+          else
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          fi
+          xcodebuild -version
+
+      - name: Build unsigned IPA
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          BAZEL_USER_ROOT="/private/var/tmp/_bazel_telegram_bots"
+          BUILD_NUMBER="${{ github.run_number }}"
+          python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs || true
+          python3 -u build-system/Make/Make.py \
+            --bazelUserRoot="$BAZEL_USER_ROOT" \
+            --overrideXcodeVersion \
+            build \
+            --configurationPath=build-system/tezam-configuration.json \
+            --codesigningInformationPath=build-system/fake-codesigning \
+            --configuration=release_arm64 \
+            --buildNumber="$BUILD_NUMBER" \
+            --disableProvisioningProfiles
+
+          OUTPUT_PATH="$SOURCE_DIR/build/artifacts"
+          mkdir -p "$OUTPUT_PATH"
+          shopt -s nullglob
+          IPAS=(bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa)
+          if [[ ${#IPAS[@]} -eq 0 ]]; then
+            # Fallback: any Telegram.ipa under bazel-out
+            IPAS=( $(find bazel-out -name 'Telegram.ipa' 2>/dev/null | head -n 5) )
+          fi
+          if [[ ${#IPAS[@]} -eq 0 ]]; then
+            echo "No IPA produced" >&2
+            find bazel-out -name '*.ipa' 2>/dev/null | head || true
+            df -h /
+            exit 1
+          fi
+          cp "${IPAS[0]}" "$OUTPUT_PATH/Telegram-bots-folder.ipa"
+          ls -lh "$OUTPUT_PATH"
+          echo "IPA_PATH=$OUTPUT_PATH/Telegram-bots-folder.ipa" >> "$GITHUB_ENV"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-bots-folder-ios
+          path: /Users/Shared/telegram-ios/build/artifacts/Telegram-bots-folder.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v0.1.0-ios-${{ github.run_number }}"
+          gh release create "$TAG" \
+            /Users/Shared/telegram-ios/build/artifacts/Telegram-bots-folder.ipa \
+            --repo "${{ github.repository }}" \
+            --title "v0.1.0 — iOS unsigned IPA (#${{ github.run_number }})" \
+            --notes "$(cat <<'EOF'
+          ## iOS
+          Unsigned IPA (fake-codesigning), same style as official Telegram-iOS CI.
+
+          Install via Sideloadly / AltStore / your Apple Developer resign.
+
+          ## Android
+          See [v0.1.0-android](https://github.com/kozhariks/telegram-bots-folder-store/releases/tag/v0.1.0-android).
+          EOF
+          )"

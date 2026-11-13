@@ -156,14 +156,25 @@ jobs:
           fi
           echo "Using $SELECTED"
           sudo xcode-select -s "$SELECTED/Contents/Developer"
+          # dav1d arm64-iPhoneOS.meson hardcodes /Applications/Xcode.app — keep that path.
+          sudo rm -f /Applications/Xcode.app
+          sudo ln -sfn "$SELECTED" /Applications/Xcode.app
           xcodebuild -version
-          # Remove other Xcode apps to free disk for Bazel (keep selected).
-          for app in /Applications/Xcode*.app; do
-            if [[ "$app" != "$SELECTED" ]]; then
-              echo "Removing $app to free disk"
-              sudo rm -rf "$app" || true
+          xcrun --sdk iphoneos --show-sdk-path
+          # Free disk: drop unused Xcode_* copies (never delete the selected realpath / Xcode.app).
+          SELECTED_REAL="$(cd "$SELECTED" && pwd -P)"
+          for app in /Applications/Xcode_*.app; do
+            [[ -e "$app" ]] || continue
+            app_real="$(cd "$app" && pwd -P)"
+            if [[ "$app_real" == "$SELECTED_REAL" ]]; then
+              continue
             fi
+            echo "Removing $app to free disk"
+            sudo rm -rf "$app" || true
           done
+          # Ensure symlink still present after cleanup
+          ls -la /Applications/Xcode.app
+          test -d /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform
           df -h /
 
       - name: Build unsigned IPA
